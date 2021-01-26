@@ -1,0 +1,522 @@
+---
+title: "Retail project"
+author: "Leslie"
+date: "04/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(fpp3)
+library(readabs)
+library(ggthemes)
+library(ggplot2)
+```
+
+Preparation works
+```{r}
+# read data from database
+set.seed(29172977)
+myseries <- aus_retail %>%
+  filter(
+    `Series ID` == sample(aus_retail$`Series ID`,1),
+    Month < yearmonth("2018 Jan")
+  )
+```
+
+### Report----------------------------------------------------------------------------------------------------------------
+
+# 1.A discussion of the statistical features of the original data.
+```{r}
+head(myseries,n = 36)
+
+summary(myseries)
+
+myseries %>% 
+  autoplot(Turnover) +
+  xlab('Month') + ylab('Turnover $ million') +
+  ggtitle('Retail Project')
+
+min(myseries$Turnover) # 16
+max(myseries$Turnover) # 182.3
+```
+This graph is just simply plotted value of Turnover against the time, from April 1982 to Decemeber 2017, using the monthly data. It is easily to see that both trend and seasonal components are included in this series. For the trend component, it can be easily seen that there is an upward trend until year 2010 followed by a wave-pattern from 2010 onward to 2017. It still shows an upward trend if we overlook the wave though, Turnover value arise from 16 million AUD to 182.3 millon AUD.  
+
+To investigate whether the sesaonal components exist or not, we could applied the seasonal plot to see if the interval between peak and trough is always of a fixed and known period.
+```{r}
+myseries %>% 
+  gg_season(Turnover,label = "both") +
+  ylab('Turnover $ million') + 
+  ggtitle('seasonal plot')
+
+myseries %>% 
+  gg_subseries(Turnover)
+```
+For the seasonal components, we could observe that there always exist a peak at Decemeber at every year and a trough at either Januaray or Feburary. this pattern reckon seasonaly components do exist. Besides, a cyclic components is not obvious but it is evidence becuase the trend is not as a steady rate. Lastely, the magintute of the variation is not same for different season, wchich indicate it may have the ARCH or GARCH effect exist, so it is necessary for us to transform the data trying to stablise the variance for different time periods.
+
+
+# 2.Explanation of transformations and differencing used. You should use a unit-root test as part of the discussion.
+```{r}
+# Plotting the orginal model
+myseries %>% autoplot(Turnover)
+```
+We could conclude that the size of the seasonal variation are not the same across the whole series which suggest that the transformation is necessary, then applying the 'guerror' method.
+```{r}
+lambda <- myseries %>% 
+  features(Turnover,features = guerrero) %>% 
+  pull(lambda_guerrero)
+
+lambda # -0.03996428
+
+myseries %>%
+  autoplot(box_cox(Turnover,lambda))
+
+# We could try the log transformation as we are more familiar with the statitical property of logarithmic function.
+
+myseries %>% 
+  autoplot(log(Turnover))
+```
+After applying the log transformation, we could see that the variance of data has become realtively stable among time.Since the log transformation still do a reasonable job for us,we would select method of log transformation.
+
+Now, split our data into two part, the first 80% should be training set and the last 20% should be the testing set.
+```{r}
+# myseries has 429 rows, so we select the last 24 observations as our testing set and the rest is assumed as the training set
+
+myseries_tr <- myseries %>% 
+   slice(1:405)
+myseries_tr
+
+myseries_ts <- myseries %>% 
+  slice(406:429)
+myseries_ts
+```
+It is necessary to difference the dataset ?
+```{r}
+# Using the unit-root test
+mm <-myseries %>% 
+  mutate(Turnover = log(Turnover)) %>% 
+  features(Turnover,unitroot_kpss)
+
+myseries %>% 
+  features(Turnover,unitroot_ndiffs)
+```
+Since for the kpss test, the null hypothesis is : there is no unit root in the series, since the p-value is 0.01 less than 0.05, we would reject the null hypothesis under 5% signifiance level and concluded that we need to difference the series to render its stationarity.
+
+Also, when using the unitroot_ndiffs, the function suggest that we need to difference the series once, which is same as what we perfomed in unitroot_kpss test.
+
+We could also apply seasonal strength and unitroot_nsdiffs to see whether we need to do the seasonal difference
+```{r}
+# Method 1 :
+myseries %>% 
+  features(Turnover,unitroot_nsdiffs) # suggest that we need to do seasonal difference once
+
+# Method 2 :
+myseries %>% 
+  mutate(Turnover = log(Turnover)) %>% 
+  features(Turnover,list(unitroot_ndiffs,feat_stl)) # since the seasonal_strength is 0.883905 > 0.64, so we need to do one seasonal difference 
+```
+
+Check the model after non-seasonal difference once followed by seasonal difference once
+```{r}
+myseries %>% gg_tsdisplay(difference(difference(log(Turnover),12)),lag_max = 24,plot_type = 'partial')
+
+myseries %>% 
+  mutate(Turnover = difference(difference(log(Turnover),12))) %>% 
+  features(Turnover,unitroot_kpss)
+```
+When doing the kpss test for the 2nd order differencing data, since the p-value now is 0.1 which is bigger than 0.05, so we cannot reject the null hypothesis, then conclude that the 2nd order differencing data is stationary now.
+
+We also used gg_tsdisplay function to see the performance of our 2nd order differencing data, even if the ACF did not declay quickly, but we could see that the time plot seems like a stationary process beacuse it's mean reverting behaviour.
+
+# 3.A description of the methodology used to create a short-list of appropriate ARIMA models and ETS models. Include discussion of AIC values as well as results from applying the models to a test-set consisting of the last 24 months of data provided.
+
+(1) : ARIMA model selection : 
+
+By looking at the ACF and the PACF plot, for the first 11 lags, there is a exponentally decay in PACF and a significant lag for the ACF but no other significant until lag 12, we would suggest ARIMA(0,1,2) For the seasonal part, since the PACF exponentially decay and a spike in lag 12 in the ACF but no other significant lag, we woudl select ARIMA(0,1,1) for the seasonal part.
+
+So, our final guess potential model is ARIMA(0,1,2)(0,1,1)[12]
+
+Some othe rpotential models are : 
+`ARIMA(0,1,2)(0,1,1)[12] without drift` 
+`ARIMA(0,1,1)(0,1,1)[12] without drift`
+`ARIMA(0,1,0)(0,1,1)[12] without drift`
+`ARIMA(0,1,2)(0,1,0)[12] without drift`
+
+
+Applying the four possible models and check both the AICc values
+```{r}
+myseries_tr %>% 
+  model(
+`ARIMA(0,1,2)(0,1,1)[12] without drift` = ARIMA(log(Turnover) ~ 0 + pdq(0,1,2) + PDQ(0,1,1)),
+`ARIMA(0,1,1)(0,1,1)[12] without drift` = ARIMA(log(Turnover) ~ 0 + pdq(0,1,1) + PDQ(0,1,1)),
+`ARIMA(0,1,0)(0,1,1)[12] without drift` = ARIMA(log(Turnover) ~ 0 + pdq(0,1,0) + PDQ(0,1,1)),
+`ARIMA(0,1,2)(0,1,0)[12] without drift` = ARIMA(log(Turnover) ~ 0 + pdq(0,1,2) + PDQ(0,1,0))
+  ) %>% 
+  glance() %>% 
+  arrange(AICc) %>% 
+  select(.model,AICc)
+```
+Let R automatically choose the best model, setting the stepwise = FALSE,approximation = FALSE
+```{r}
+myseries_tr %>% 
+  model(ARIMA(log(Turnover) ~ pdq(d = 1) + PDQ(D = 1),stepwise = FALSE,approximation = FALSE,
+              order_constraint = P + q + P + Q <= 10)) %>% 
+  report() # The best model selected by R automatically is ARIMA(1,1,2)(0,1,1) with AICc equal to -1143.49
+``` 
+The model selected by R is : `ARIMA(1,1,2)(0,1,1) without drift`
+The best guess is : `ARIMA(0,1,2)(0,1,1)[12] without drift`
+
+When using the AICc approach to compare those model, we would suggest ARIMA(1,1,2)(0,1,1). Furthermore, we would compare the automatically generated model with the best model manually selected using the test accuracy.
+```{r}
+fit <- myseries_tr %>% 
+  model(
+    Auto = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1)),
+    Manual = ARIMA(log(Turnover) ~ pdq(0,1,2) + PDQ(0,1,1))
+  )
+
+fc <- fit %>% 
+  forecast(h = 24)
+fc
+myseries_tr
+
+fc %>% 
+  autoplot(myseries_ts,level = NULL)
+
+accuracy(fc,myseries_ts) %>% 
+  select(.model,RMSE) %>% 
+  arrange(RMSE)
+```
+The RMSE suggest us to choose the ARIMA(0,1,2)(0,1,1) instead. Since the AICc values betwwen the auto model and the manual model are not that close compared with the RMSE values based on the test set, I would use the model will the smallest AICc,which is ARIMA(1,1,2)(0,1,1).
+
+
+(2) : ETS model selection :
+For estimating the ETS model, we firstly need to make sure three components : the trend, seasonal and the the error components, therefore we would use the STL decomposition plot to check those three components.
+```{r}
+myseries %>% 
+  model(STL(Turnover ~ trend(window = 21) + season(window = 13),robust = TRUE )) %>% 
+  components() %>% 
+  autoplot()
+```
+(a):For the error term, it may be either additive error or the multiplicative error.
+(b):For the trend term, a steady increase trend may suggest to use the additive or the additive damped trend.
+(c):For the seasonal term, since the time plot shows that the seasonal variation in the data are almost identical as the level of the series increases (even if there is a slight increase in the variation as the level of the sereis increases)
+
+So, the potential ETS models are :
+`ETS(log(Turnover) ~ error('A') + trend('A') + season('A'))`
+`ETS(log(Turnover) ~ error('M') + trend('A') + season('A'))`
+`ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A'))`
+`ETS(log(Turnover) ~ error('M') + trend('Ad') + season('A'))`
+```{r}
+myseries %>% 
+  model(
+    AAA =  ETS(log(Turnover) ~ error('A') + trend('A') + season('A')),
+    MAA =  ETS(log(Turnover) ~ error('M') + trend('A') + season('A')),
+    AAdA = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A')),
+    MAdA = ETS(log(Turnover) ~ error('M') + trend('Ad') + season('A'))
+  ) %>% 
+  glance() %>% 
+  arrange(AICc) %>% 
+  select(.model,AICc)
+```
+Chosing the best model by finding the minmium AICc value, we would select the `ETS(log(Turnover) ~ error('A') + trend('A') + season('A'))` among four potential models.
+
+Then, letting R automatically generate the model for us 
+```{r}
+myseries %>% 
+  model(
+    ETS(log(Turnover))
+  ) %>% 
+  report()
+```
+The best model selected by R is ETS(A,Ad,A) which is identical to what we expected.Same as how we select the ARIMA model , we still use the RMSE based on the test set to select the model.
+```{r}
+fit <- myseries_tr %>% 
+  model(
+    AAA =  ETS(log(Turnover) ~ error('A') + trend('A') + season('A')),
+    MAA =  ETS(log(Turnover) ~ error('M') + trend('A') + season('A')),
+    AAdA = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A')),
+    MAdA = ETS(log(Turnover) ~ error('M') + trend('Ad') + season('A'))
+  )
+
+tidy(fit)
+
+glance(fit)
+
+fc <- fit %>% 
+  forecast(h = 24)
+
+fc %>%
+  autoplot(myseries_ts,level = NULL)
+
+accuracy(fc,myseries_ts) %>% 
+  select(.model,RMSE) %>% 
+  arrange(RMSE)
+```
+Comparing RMSE,the test set accuracy argument  also indictate that the the best model is ETS(log_Turnover ~ error('A') + trend('Ad') + season('A')).
+
+
+
+** Fit the data into test set
+```{r}
+# fit the ARIMA model on the training set 
+fit_ARIMA <- myseries_tr %>% 
+  model(ARIMA = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1)))
+
+# fit the ETS model on the training set
+fit_ETS <- myseries_tr %>% 
+  model(ETS = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A')))
+```
+
+```{r}
+# forecast using ARIMA model
+fc_ARIMA <- fit_ARIMA %>% 
+  forecast(h = 24)
+fc_ARIMA %>% 
+  autoplot(myseries,level = NULL)
+
+# forecast using ETS model
+fc_ETS <- fit_ETS %>% 
+  forecast(h = 24)
+fc_ETS %>% 
+  autoplot(myseries,level = NULL,color = 'red')
+
+# Combine ETS plot and ARIAM plot together 
+
+fit_combine <- myseries_tr %>% 
+  model(ETS = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A')),
+       ARIMA = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1)))
+
+fc_combine <- fit_combine %>% 
+  forecast(h = "2 years")
+fc_combine %>%
+  autoplot(myseries,level = NULL) +
+  facet_grid(vars(.model))
+```
+
+Compute the model accuracy using both training and test set 
+```{r}
+model_accuracy <- bind_rows(
+  accuracy(fit_ARIMA),
+  accuracy(fit_ETS),
+  accuracy(fc_ARIMA,myseries_ts),
+  accuracy(fc_ETS,myseries_ts)
+)
+
+model_accuracy
+
+model_accuracy %>% 
+  select(.model,.type,RMSE) %>% 
+  arrange(RMSE)
+```
+The table shows the accuracy for ARIMA model and ETS model under both training and test set. For the training set, the ARIMA model has a lower RMSE value 3.989224. For the test set, the ETS model has a slight lower RMSE value 8.294623. Since we need to put more weight into the accuracy for the test set.Finally, we concluded that ETS model does a better job for us.
+
+# 4.Choose one ARIMA model and one ETS model based on this analysis and show parameter estimates, residual diagnostics, forecasts and prediction intervals for both models. Diagnostic checking for both models should include ACF graphs as well as the Ljung-Box test.
+
+(1) : parameter estimates : 
+```{r}
+ARIMA <- myseries_tr %>% 
+  model(
+    ARIMA = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1))
+  )
+ARIMA %>% report() # 4 parameters
+
+ETS <- myseries_tr %>% 
+  model(
+    ETS = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A'))
+  )
+ETS %>% report() # 17 parameters 
+```
+(2): 80% prediction interval 
+
+```{r}
+# 80% prediction interval for the ARIMA model
+PI1 <- fc_ARIMA %>% 
+  mutate(prediction_interval = hilo(.distribution,80))
+PI1 %>% 
+  as_tsibble() %>% 
+  select(-State,-Industry,-.distribution)
+
+# 80% prediction interval for the ETS model
+PI2 <- fc_ETS %>% 
+  mutate(prediction_interval = hilo(.distribution,80))
+PI2 %>% 
+  as_tsibble() %>% 
+  select(-State,-Industry,-.distribution)
+```
+(3): residual diagnostics
+
+ (a):ARIMA model
+```{r}
+# Residuals of the ARIMA model 
+fit_ARIMA %>% gg_tsresiduals() # significant spike at lag 7
+
+# Ljung_box test
+augment(fit_ARIMA) %>% 
+  features(.resid,ljung_box,dof = 4,lag = 24) # dof = 4 because we have four parameters to estimate, lags = 24 since it's a monthly data. P-value = 0.01970 < 0.05 indicates that we can reject the null hypothesis under 5% significance level, so we could not assume that residual is white noise process.
+```
+
+ (b) : ETS model
+```{r}
+# Residuals of the ETS model
+fit_ETS %>% gg_tsresiduals() # significant spikes at lag 1 & 7 
+
+# Ljung_box test
+augment(fit_ETS) %>% 
+  features(.resid,ljung_box,dof = 17,lag = 24) # From the above analysis, we acknowledged that there are 17 parameters to be estimated. P-value = 1.366567e-08 < 0.05 indicates that we can reject the null hypothesis under 5% significance level, so we could not assume that residual is white noise process.
+```
+Both ARIMA model and ETS model can reject the null hypothesis which suggest that the residuals of both model did not follow the white noise process. Also by lokking at the ACFs from two models, we could see that both ACF contians significant lags suggesting the residuals are not independent(correlated),so the prediction interval may not be reliable, since the way hwo R generate the prediction interval is based on the assumption that the error terms are white noise process.
+
+(4) : Forecasting 
+```{r}
+# forecast using ARIMA model
+fc_ARIMA <- fit_ARIMA %>% 
+  forecast(h = 24)
+fc_ARIMA %>% 
+  autoplot(myseries)
+
+# forecast using ETS model
+fc_ETS <- fit_ETS %>% 
+  forecast(h = 24)
+fc_ETS %>% 
+  autoplot(myseries,color = 'red')
+
+# Combine them together 
+fit_overall <- myseries_tr %>% 
+  model(
+    ARIMA = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1)),
+    ETS = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A'))
+  )
+fc_overall <- fit_overall %>%
+  forecast(h = 24)
+
+fc_overall %>% 
+  autoplot(myseries) +
+  xlim(yearmonth(c('2015','2018'))) + theme_dark() + 
+  xlab("Month") +
+  ylab("Turnover $ million") +
+  ggtitle("Forecasting retail turnover")
+```
+The plot shows the actual value with point forecast with prediction interval, it can be observed that the prediction interval has covered all the point forecast, indicating we did a great job, also the ETS model did a better job since the point forecast from the ETS model are more close to the actual value.
+
+# 5.Comparison of the results from each of your preferred models. Which method do you think gives the better forecasts? Explain with reference to the test-set.
+```{r}
+accuracy <- bind_rows(
+  accuracy(fc_ARIMA,myseries_ts),
+  accuracy(fc_ETS,myseries_ts)
+)
+
+accuracy
+
+accuracy %>% 
+  select(.model,.type,RMSE) %>% 
+  arrange(RMSE)
+```
+After comparing the RMSE values using the test set as the buliding blocks, we would suggest that the ETS(A,Ad,A) has a better performance since it has a smaller value for the RMSE component. Lower value of the RMSE indicate higer accuracy in forcasting, in that sense, ETS(A,Ad,A) is a better model.
+
+# 6.Apply your two chosen models to the full data set and produce out-of-sample point forecasts and 80% prediction intervals for each model for two years past the end of the data provided.
+```{r}
+fit_ARIMA_new <- myseries %>% 
+    model(
+    ARIMA = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1))
+  )
+fc_ARIMA_new <- fit_ARIMA_new %>% 
+  forecast(h = "2 years")
+
+fc_ARIMA_new %>% 
+  autoplot(myseries,level = 80) + 
+  xlim(yearmonth(c('2016','2020'))) + ggtitle("fc_ARIMA_new")
+
+PI3 <- fc_ARIMA_new %>% 
+  mutate(prediction_interval = hilo(.distribution,80))
+
+fit_ETS_new <- myseries %>% 
+  model(
+     ETS = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A'))
+  ) 
+fc_ETS_new <- fit_ETS_new %>% 
+  forecast( h = "2 years")
+
+fc_ETS_new %>% 
+  autoplot(myseries,level = 80) + 
+  xlim(yearmonth(c('2016','2020')))  + ggtitle("fc_ETS_new")
+
+PI4 <- fc_ETS_new %>% 
+  mutate(prediction_interval = hilo(.distribution,80))
+```
+Applying a out-of-sample and 80% prediction interval, we could see that the proint forcasting did a good job for us, as it reasonably capture the trend and the seasonality in the original data, the prediction interval looks acceptable, as it is not too high or too low, but a little bittle wild. However, if we include 95% prediction interval, it will cause the prediction interval more wilder.
+
+
+# 7.Obtain up-to-date data from the ABS website (Cat. 8501.0, Table 11), and compare your forecasts with the actual numbers. How well did you do? [Hint: the readabs package can help in getting the data into R.]
+
+```{r}
+abs <- read_abs(series_id = "A3349361W")
+abs
+myseries_2020 <- abs %>% 
+  separate(col = series,into = c('Turnover','State','Industry'),sep = ";") %>% 
+  select(-Turnover) %>% 
+  rename(Turnover = 'value',Month = 'date') %>% 
+  select(State,Industry,series_id,Month,Turnover) %>% 
+  mutate(Month = yearmonth(Month)) %>% 
+  as_tsibble(index = Month) %>% 
+  filter(year(Month) < 2020)
+myseries_2020
+```
+After some data cleaning process, we get the newest tidy verison of the up-to-data data, since our two years forecast only forecast the value of turnover until 2019 Dec, for the accuarcy purpose, I shrink the dataset aimed to keep the volumn of the new dataet to make sure it also contain the value of turnover until 2019 Dec.
+
+Compare the forecast with the actual numbers and check for its performance
+```{r}
+accuracy_new <- bind_rows(
+  accuracy(fit_ARIMA_new),
+  accuracy(fit_ETS_new),
+  accuracy(fc_ARIMA_new,myseries_2020),
+  accuracy(fc_ETS_new,myseries_2020)
+) %>% 
+  group_by(.type)
+accuracy_new$State[is.na(accuracy_new$State)] <- "South Australia"
+accuracy_new$Industry[is.na(accuracy_new$Industry)] <- "Electrical and electronic goods retailing"
+
+accuracy_new
+```
+Comparing with the acctual data, both models give a reasonable forecast, but using the RMSE method, we could see that ETS model did a better job than ARIMA model since it has a lower RMSE value.
+
+```{r}
+fit_overall_new <- myseries %>% 
+  model(
+     ARIMA = ARIMA(log(Turnover) ~ pdq(1,1,2) + PDQ(0,1,1)),
+     ETS = ETS(log(Turnover) ~ error('A') + trend('Ad') + season('A'))
+  )
+fc_overall_new <- fit_overall_new %>%
+  forecast(h = "2 years") %>% 
+  select(.model,Month,Turnover,.distribution)
+
+fc_overall_new %>% 
+  autoplot(myseries_2020,level = 80,alpha = 0.5)+
+  xlim(yearmonth(c("2017","2020"))) + 
+  xlab("Month") +
+  ylab("Turnover $ million") +
+  ggtitle("Forecastinf reatil Turnover from Jan 2018 to Dec 2019")
+
+```
+From the plot, we could observed that all the actual values fall inside the prediction interval,but the lower bond for the prediction interval seems too wild for the actual value, whcih means the model still could be imporved but required more precise and advanced setting.
+
+# 8.A discussion of benefits and limitations of the models for your data
+
+ARIMA model could only handle with additive error,if instead our data has multiplicative error, we need to do some additional work beforhands, otherwise, our model would be useless.But the ETS model could handle both additive error and multiplicative.For the benefits of ARIMA model, it accpet missing values, where an ETS cannot, and there are infinite possible models for the time series follows the ARIMA process, but there are only eight possible ETS models.
+
+In general, ETS model perform better in the short term forecasting, which is the reason why we perfer ETS model in this project, also, all the ETS models are non-stationary so we do not need to difference the data to make it stationary whcih saves quiet a lot times for us, but if we want to investigate more precisly about the nature of our data, I would rather use the ARIMA model since from the sturcture along with the properties of ARIMA model, we would absorb more useful information when understanding the model (whether it is a stochastic trend or deterministic trend, could we use the VECM model and how to find the CIV..etc).
+
+
+
+
+
+
+
+
+
+
+
+
+
